@@ -18,7 +18,7 @@ import plotly.express as px
 
 DB_PATH = "dance_school.db"
 RESET_ON_START = "--reset" in sys.argv
-st.experimental_rerun()
+
 
 # -------------------------
 # DB helpers & initialization
@@ -194,7 +194,7 @@ def admin_students_page():
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (name.strip(), int(age), gender, class_id, contact.strip() or None, guardian.strip() or None, date.today().isoformat(), notes.strip() or None))
             st.success(f"Added student: {name.strip()}")
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("---")
     st.subheader("Students List")
@@ -221,7 +221,7 @@ def admin_students_page():
             if c2.button("Delete", key=f"del_{s['id']}"):
                 execute_sql("DELETE FROM students WHERE id=?", (s['id'],))
                 st.success("Deleted.")
-                st.experimental_rerun()
+                st.rerun()
 
     # Edit form if requested
     if st.session_state.get("editing_student_id"):
@@ -257,7 +257,7 @@ def admin_students_page():
                             (new_name.strip(), int(new_age), new_gender, new_class_id, new_contact.strip() or None, new_guardian.strip() or None, new_notes.strip() or None, sid))
                 st.success("Student updated")
                 del st.session_state["editing_student_id"]
-                st.experimental_rerun()
+                st.rerun()
 
 def admin_classes_page():
     st.header("Classes — Add / Delete")
@@ -275,7 +275,7 @@ def admin_classes_page():
             execute_sql("INSERT INTO classes (class_type, day_of_week, time, instructor, notes) VALUES (?,?,?,?,?)",
                         (class_type, day, time_str.strip(), instructor.strip() or None, notes.strip() or None))
             st.success("Class added")
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("---")
     classes = fetchall_dict("SELECT * FROM classes ORDER BY id DESC")
@@ -292,7 +292,7 @@ def admin_classes_page():
                 execute_sql("UPDATE students SET class_id=NULL WHERE class_id=?", (c['id'],))
                 execute_sql("DELETE FROM classes WHERE id=?", (c['id'],))
                 st.success("Class deleted (students unassigned)")
-                st.experimental_rerun()
+                st.rerun()
 def admin_attendance_page():
     st.header("Attendance (Enhanced)")
 
@@ -366,7 +366,7 @@ def admin_attendance_page():
             upsert_attendance(sel_cid, s['id'], today, status)
             saved += 1
         st.success(f"Saved attendance for {saved} students")
-        st.experimental_rerun()
+        st.rerun()
 
     st.markdown("---")
     st.subheader("Attendance Records (latest first)")
@@ -402,7 +402,7 @@ def admin_fees_page():
         execute_sql("INSERT INTO fees (student_id, amount, month, status, paid_date) VALUES (?,?,?,?,?)",
                     (sid, float(amount), month, status, date.today().isoformat()))
         st.success("Fee recorded")
-        st.experimental_rerun()
+        st.rerun()
 
     st.markdown("---")
     st.subheader("Fee Records")
@@ -501,7 +501,7 @@ def main():
             user = authenticate(uname, pwd)
             if user:
                 st.session_state["user"] = user
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.sidebar.error("Invalid credentials")
         st.sidebar.markdown("---")
@@ -513,7 +513,7 @@ def main():
     st.sidebar.success(f"Logged in as: {user['username']} ({user['role']})")
     if st.sidebar.button("Logout"):
         st.session_state["user"] = None
-        st.experimental_rerun()
+        st.rerun()
 
     # admin reset DB button (destructive)
     if user.get("role") == "admin":
@@ -521,7 +521,7 @@ def main():
             init_db(reset=True)
             st.sidebar.success("DB reset. Please login again.")
             st.session_state["user"] = None
-            st.experimental_rerun()
+            st.rerun()
 
     # routing
     if user.get("role") == "admin":
