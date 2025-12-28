@@ -122,11 +122,11 @@ def init_db(reset: bool = False):
     )
     """)
     # ensure admin user exists
-    cur.execute("SELECT COUNT(*) as cnt FROM users WHERE role='Admin'")
+    cur.execute("SELECT COUNT(*) as cnt FROM users WHERE role='admin'")
     cnt = cur.fetchone()["cnt"]
     if cnt == 0:
         cur.execute("INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                    ("Admin", hash_password("Admin123"), "Admin"))
+                    ("admin", hash_password("admin123"), "admin"))
     conn.commit()
     conn.close()
 
