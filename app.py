@@ -121,11 +121,11 @@ def init_db(reset: bool = False):
     )
     """)
     # ensure admin user exists
-    cur.execute("SELECT COUNT(*) as cnt FROM users WHERE role='admin'")
+    cur.execute("SELECT COUNT(*) as cnt FROM users WHERE role='Admin'")
     cnt = cur.fetchone()["cnt"]
     if cnt == 0:
         cur.execute("INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                    ("admin", hash_password("admin123"), "admin"))
+                    ("Admin", hash_password("Admin123"), "Admin"))
     conn.commit()
     conn.close()
 
@@ -504,7 +504,7 @@ def main():
             else:
                 st.sidebar.error("Invalid credentials")
         st.sidebar.markdown("---")
-        st.sidebar.info("Default admin: username=`admin` password=`admin123` (use --reset to recreate DB if needed)")
+        #st.sidebar.info("Default admin: username=`admin` password=`admin123` (use --reset to recreate DB if needed)")
         return
 
     # logged in
