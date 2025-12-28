@@ -18,6 +18,7 @@ import plotly.express as px
 
 DB_PATH = "dance_school.db"
 RESET_ON_START = "--reset" in sys.argv
+st.experimental_rerun()
 
 # -------------------------
 # DB helpers & initialization
