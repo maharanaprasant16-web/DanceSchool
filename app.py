@@ -7,6 +7,11 @@ Dance School Management (Streamlit + SQLite + Plotly)
 - Admin: Add/Edit/Delete Students, Add/Delete Classes, Attendance (enhanced), Monthly Fees, Create Parent users
 - Parent: Auto-linked view of their child's profile, attendance chart, fees
 """
+st.markdown("""
+<style>
+header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
 import streamlit as st
 import sqlite3
