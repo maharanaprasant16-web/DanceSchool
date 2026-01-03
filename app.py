@@ -28,6 +28,20 @@ header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
+
+
+[ui]
+showGithubIcon = false
+hideTopBar = true
+
+[server]
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
+
+
+
 # -------------------------
 # DB helpers & initialization
 # -------------------------
