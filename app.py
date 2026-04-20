@@ -1,568 +1,526 @@
-# dance_school_streamlit_app.py
-"""
-Dance School Management (Streamlit + SQLite + Plotly)
-
-- Admin + Parent logins (hashed passwords)
-- Optional DB reset via CLI flag (--reset)
-- Admin: Add/Edit/Delete Students, Add/Delete Classes, Attendance (enhanced), Monthly Fees, Create Parent users
-- Parent: Auto-linked view of their child's profile, attendance chart, fees
-"""
-
-
 import streamlit as st
 import sqlite3
-import sys
 import hashlib
-from datetime import date, datetime
+from datetime import date
 import pandas as pd
-import plotly.express as px
+from contextlib import contextmanager
 
-DB_PATH = "dance_school.db"
-RESET_ON_START = "--reset" in sys.argv
+# ─────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────
+st.set_page_config(page_title="Natyashree School of Dance", layout="wide")
 
+DB = "dance_school.db"
+DAYS   = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+          "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
-
-st.markdown("""
-<style>
-header {visibility: hidden;}
-</style>
-""", unsafe_allow_html=True)
-
-
-
-[ui]
-showGithubIcon = false
-hideTopBar = true
-
-[server]
-enableXsrfProtection = false
-
-[browser]
-gatherUsageStats = false
+ADMIN_PAGES  = ["Students", "Classes", "Attendance", "Fees", "Users", "Logout"]
+PARENT_PAGES = ["Attendance", "Fees", "Logout"]
 
 
-
-# -------------------------
-# DB helpers & initialization
-# -------------------------
+# ─────────────────────────────────────────
+# DB HELPERS  (no builtin shadowing)
+# ─────────────────────────────────────────
+@contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Yield a connection and always close it."""
+    c = sqlite3.connect(DB, check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    try:
+        yield c
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
 
-def execute_sql(sql, params=()):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(sql, params)
-    conn.commit()
-    last = cur.lastrowid
-    conn.close()
-    return last
 
-def fetchone_dict(sql, params=()):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(sql, params)
-    row = cur.fetchone()
-    conn.close()
-    return dict(row) if row else None
+def db_run(sql: str, params: tuple = ()) -> bool:
+    """INSERT / UPDATE / DELETE. Returns True on success."""
+    try:
+        with get_conn() as c:
+            c.execute(sql, params)
+        return True
+    except sqlite3.Error as e:
+        st.error(f"DB error: {e}")
+        return False
 
-def fetchall_dict(sql, params=()):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
 
-def hash_password(pw: str) -> str:
-    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+def db_all(sql: str, params: tuple = ()) -> list[dict]:
+    """Return all rows as list of dicts."""
+    try:
+        with get_conn() as c:
+            rows = c.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.Error as e:
+        st.error(f"DB error: {e}")
+        return []
 
-def verify_password(pw: str, pw_hash: str) -> bool:
-    return hash_password(pw) == pw_hash
 
-def init_db(reset: bool = False):
-    conn = get_conn()
-    cur = conn.cursor()
-    if reset:
-        cur.execute("DROP TABLE IF EXISTS users")
-        cur.execute("DROP TABLE IF EXISTS classes")
-        cur.execute("DROP TABLE IF EXISTS students")
-        cur.execute("DROP TABLE IF EXISTS attendance")
-        cur.execute("DROP TABLE IF EXISTS fees")
-        conn.commit()
+def db_one(sql: str, params: tuple = ()) -> dict | None:
+    rows = db_all(sql, params)
+    return rows[0] if rows else None
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password_hash TEXT,
-        role TEXT,
-        student_id INTEGER
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS classes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        class_type TEXT,
-        day_of_week TEXT,
-        time TEXT,
-        instructor TEXT,
-        notes TEXT
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS students (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        age INTEGER,
-        gender TEXT,
-        class_id INTEGER,
-        contact TEXT,
-        guardian_name TEXT,
-        admission_date TEXT,
-        notes TEXT
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS attendance (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        class_id INTEGER,
-        student_id INTEGER,
-        date TEXT,
-        status TEXT
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS fees (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        student_id INTEGER,
-        amount REAL,
-        month TEXT,
-        status TEXT,
-        paid_date TEXT
-    )
-    """)
-    # ensure admin user exists
-    cur.execute("SELECT COUNT(*) as cnt FROM users WHERE role='admin'")
-    cnt = cur.fetchone()["cnt"]
-    if cnt == 0:
-        cur.execute("INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                    ("admin", hash_password("admin123"), "admin"))
-    conn.commit()
-    conn.close()
 
-# -------------------------
-# Attendance helper
-# -------------------------
-def upsert_attendance(class_id: int, student_id: int, dt: str, status: str):
-    existing = fetchone_dict("SELECT id FROM attendance WHERE class_id=? AND student_id=? AND date=?",
-                             (class_id, student_id, dt))
-    if existing:
-        execute_sql("UPDATE attendance SET status=? WHERE id=?", (status, existing["id"]))
-    else:
-        execute_sql("INSERT INTO attendance (class_id, student_id, date, status) VALUES (?, ?, ?, ?)",
-                    (class_id, student_id, dt, status))
+# ─────────────────────────────────────────
+# DB INIT  (idempotent)
+# ─────────────────────────────────────────
+def init_db():
+    ddl_statements = [
+        """CREATE TABLE IF NOT EXISTS users(
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            username      TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role          TEXT NOT NULL CHECK(role IN ('admin','parent')),
+            student_id    INTEGER REFERENCES students(id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS classes(
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            day        TEXT NOT NULL,
+            time       TEXT NOT NULL,
+            instructor TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS students(
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            name     TEXT NOT NULL,
+            age      INTEGER NOT NULL,
+            gender   TEXT NOT NULL,
+            class_id INTEGER REFERENCES classes(id),
+            guardian TEXT,
+            contact  TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS attendance(
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL REFERENCES students(id),
+            class_id   INTEGER REFERENCES classes(id),
+            date       TEXT NOT NULL,
+            status     TEXT NOT NULL,
+            UNIQUE(student_id, date)          -- prevent duplicates
+        )""",
+        """CREATE TABLE IF NOT EXISTS fees(
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL REFERENCES students(id),
+            month      TEXT NOT NULL,
+            amount     REAL NOT NULL,
+            status     TEXT NOT NULL CHECK(status IN ('due','paid')),
+            UNIQUE(student_id, month)         -- one record per student per month
+        )""",
+    ]
+    with get_conn() as c:
+        for stmt in ddl_statements:
+            c.execute(stmt)
 
-# -------------------------
-# Auth
-# -------------------------
-def authenticate(username: str, password: str):
-    row = fetchone_dict("SELECT * FROM users WHERE username=?", (username,))
-    if not row:
-        return None
-    if not row.get("password_hash"):
-        return None
-    if verify_password(password, row["password_hash"]):
-        return {"id": row["id"], "username": row["username"], "role": row["role"], "student_id": row["student_id"]}
+    # Default admin (only if none exists)
+    if not db_one("SELECT 1 FROM users WHERE role='admin'"):
+        db_run(
+            "INSERT OR IGNORE INTO users(username, password_hash, role) VALUES(?,?,?)",
+            ("admin", hash_pw("admin123"), "admin"),
+        )
+
+
+# ─────────────────────────────────────────
+# AUTH
+# ─────────────────────────────────────────
+def hash_pw(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def authenticate(username: str, password: str) -> dict | None:
+    user = db_one("SELECT * FROM users WHERE username=?", (username,))
+    if user and user["password_hash"] == hash_pw(password):
+        return user
     return None
 
-def create_parent_user(username: str, password: str, student_id=None):
-    try:
-        execute_sql("INSERT INTO users (username, password_hash, role, student_id) VALUES (?, ?, ?, ?)",
-                    (username, hash_password(password), "parent", student_id))
-        return True, "Created"
-    except sqlite3.IntegrityError:
-        return False, "Username exists"
 
-# -------------------------
-# Admin pages
-# -------------------------
-def admin_students_page():
-    st.header("Students — Add / Edit / Delete")
-
-    # classes for dropdown
-    classes = fetchall_dict("SELECT id, class_type, day_of_week, time FROM classes ORDER BY id")
-    class_map = {"Unassigned": None}
-    for c in classes:
-        class_map[f"{c['class_type']} - {c['day_of_week']} {c['time']} (ID:{c['id']})"] = c["id"]
-
-    with st.form("add_student_form", clear_on_submit=True):
-        st.subheader("Add Student")
-        name = st.text_input("Name")
-        age = st.number_input("Age", min_value=3, max_value=100, value=8)
-        gender = st.selectbox("Gender", ["Male", "Female", "Other"])
-        class_label = st.selectbox("Class (assign)", list(class_map.keys()))
-        class_id = class_map[class_label]
-        contact = st.text_input("Contact")
-        guardian = st.text_input("Guardian Name")
-        notes = st.text_area("Notes")
-        add_submitted = st.form_submit_button("Add Student")
-    if add_submitted:
-        if not name.strip():
-            st.error("Student name required")
-        else:
-            execute_sql("""INSERT INTO students (name, age, gender, class_id, contact, guardian_name, admission_date, notes)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (name.strip(), int(age), gender, class_id, contact.strip() or None, guardian.strip() or None, date.today().isoformat(), notes.strip() or None))
-            st.success(f"Added student: {name.strip()}")
+# ─────────────────────────────────────────
+# LAYOUT HELPERS
+# ─────────────────────────────────────────
+def top_menu(role: str):
+    pages = ADMIN_PAGES if role == "admin" else PARENT_PAGES
+    cols  = st.columns(len(pages))
+    for col, page in zip(cols, pages):
+        if col.button(page, use_container_width=True):
+            st.session_state.page = page
             st.rerun()
 
-    st.markdown("---")
-    st.subheader("Students List")
-    students = fetchall_dict("""
-        SELECT s.id, s.name, s.age, s.gender, s.contact, s.guardian_name, s.class_id,
-               c.class_type, c.day_of_week, c.time
-        FROM students s LEFT JOIN classes c ON s.class_id=c.id
-        ORDER BY s.id DESC
-    """)
+
+def require_admin():
+    if st.session_state.user.get("role") != "admin":
+        st.warning("Access denied.")
+        st.stop()
+
+
+# ─────────────────────────────────────────
+# PAGE: STUDENTS
+# ─────────────────────────────────────────
+def students_page():
+    require_admin()
+    st.header("👩‍🎓 Students")
+
+    classes = db_all("SELECT id, name FROM classes ORDER BY name")
+    class_options = {c["name"]: c["id"] for c in classes}
+    class_options_with_none = {"— None —": None, **class_options}
+
+    # ── Add student ──────────────────────────────────────────────────
+    with st.expander("➕ Add Student"):
+        col1, col2 = st.columns(2)
+        with col1:
+            name    = st.text_input("Full Name", key="new_s_name")
+            age     = st.number_input("Age", min_value=3, max_value=100, key="new_s_age")
+            gender  = st.selectbox("Gender", ["Female", "Male", "Other"], key="new_s_gender")
+        with col2:
+            cls     = st.selectbox("Class", list(class_options_with_none), key="new_s_class")
+            guardian = st.text_input("Guardian Name", key="new_s_guardian")
+            contact  = st.text_input("Contact Number", key="new_s_contact")
+
+        if st.button("➕ Add Student", type="primary"):
+            if not name.strip():
+                st.warning("Name is required.")
+            else:
+                ok = db_run(
+                    "INSERT INTO students(name,age,gender,class_id,guardian,contact) VALUES(?,?,?,?,?,?)",
+                    (name.strip(), age, gender, class_options_with_none[cls], guardian, contact),
+                )
+                if ok:
+                    st.success(f"✅ '{name}' added.")
+                    st.rerun()
+
+    # ── List / edit / delete ─────────────────────────────────────────
+    students = db_all("SELECT s.*, c.name AS class_name FROM students s LEFT JOIN classes c ON s.class_id=c.id ORDER BY s.name")
     if not students:
         st.info("No students yet.")
-    else:
-        df = pd.DataFrame(students)
-        df['class'] = df.apply(lambda r: f"{r.get('class_type') or ''} {r.get('day_of_week') or ''} {r.get('time') or ''}".strip()
-                               if r.get('class_type') else "Unassigned", axis=1)
-        st.dataframe(df[['id','name','age','gender','guardian_name','contact','class']])
+        return
 
-        st.markdown("### Manage individual students")
-        for s in students:
-            c1, c2 = st.columns([6,1])
-            c1.write(f"**{s['name']}** — Parent: {s.get('guardian_name') or '-'} — Contact: {s.get('contact') or '-'} — Class ID: {s.get('class_id') or 'Unassigned'}")
-            if c2.button("Edit", key=f"edit_{s['id']}"):
-                st.session_state["editing_student_id"] = s['id']
-            if c2.button("Delete", key=f"del_{s['id']}"):
-                execute_sql("DELETE FROM students WHERE id=?", (s['id'],))
-                st.success("Deleted.")
+    for s in students:
+        label = f"{s['name']}  •  {s.get('class_name') or 'No class'}  •  Age {s['age']}"
+        with st.expander(label):
+            c1, c2 = st.columns(2)
+            with c1:
+                new_name = st.text_input("Name",    s["name"],    key=f"sn{s['id']}")
+                new_age  = st.number_input("Age", 3, 100, s["age"], key=f"sa{s['id']}")
+                new_gen  = st.selectbox("Gender", ["Female","Male","Other"],
+                                        index=["Female","Male","Other"].index(s["gender"]) if s["gender"] in ["Female","Male","Other"] else 0,
+                                        key=f"sg{s['id']}")
+            with c2:
+                new_cls_key  = st.selectbox("Class", list(class_options_with_none),
+                                            index=list(class_options_with_none.values()).index(s["class_id"])
+                                            if s["class_id"] in class_options_with_none.values() else 0,
+                                            key=f"sc{s['id']}")
+                new_guardian = st.text_input("Guardian", s.get("guardian") or "", key=f"sgu{s['id']}")
+                new_contact  = st.text_input("Contact",  s.get("contact")  or "", key=f"sco{s['id']}")
+
+            b1, b2 = st.columns(2)
+            if b1.button("💾 Update", key=f"su{s['id']}"):
+                db_run(
+                    "UPDATE students SET name=?,age=?,gender=?,class_id=?,guardian=?,contact=? WHERE id=?",
+                    (new_name, new_age, new_gen, class_options_with_none[new_cls_key], new_guardian, new_contact, s["id"]),
+                )
+                st.success("Updated ✅")
+                st.rerun()
+            if b2.button("🗑️ Delete", key=f"sd{s['id']}"):
+                db_run("DELETE FROM students WHERE id=?", (s["id"],))
+                st.warning(f"'{s['name']}' deleted.")
                 st.rerun()
 
-    # Edit form if requested
-    if st.session_state.get("editing_student_id"):
-        sid = st.session_state["editing_student_id"]
-        rec = fetchone_dict("SELECT * FROM students WHERE id=?", (sid,))
-        if rec:
-            st.markdown("---")
-            st.subheader(f"Edit Student: {rec['name']}")
-            with st.form("edit_student_form"):
-                new_name = st.text_input("Name", value=rec['name'])
-                new_age = st.number_input("Age", min_value=3, max_value=100, value=rec.get('age') or 8)
-                gender_opts = ["Male","Female","Other"]
-                try:
-                    gender_index = gender_opts.index(rec.get('gender')) if rec.get('gender') in gender_opts else 0
-                except Exception:
-                    gender_index = 0
-                new_gender = st.selectbox("Gender", gender_opts, index=gender_index)
-                # class dropdown
-                class_labels = list(class_map.keys())
-                try:
-                    default_index = list(class_map.values()).index(rec.get('class_id'))
-                except ValueError:
-                    default_index = 0
-                new_class_label = st.selectbox("Class", class_labels, index=default_index)
-                new_class_id = class_map[new_class_label]
-                new_contact = st.text_input("Contact", value=rec.get('contact') or "")
-                new_guardian = st.text_input("Guardian Name", value=rec.get('guardian_name') or "")
-                new_notes = st.text_area("Notes", value=rec.get('notes') or "")
-                save_submitted = st.form_submit_button("Save Changes")
-            if save_submitted:
-                execute_sql("""UPDATE students SET name=?, age=?, gender=?, class_id=?, contact=?, guardian_name=?, notes=?
-                               WHERE id=?""",
-                            (new_name.strip(), int(new_age), new_gender, new_class_id, new_contact.strip() or None, new_guardian.strip() or None, new_notes.strip() or None, sid))
-                st.success("Student updated")
-                del st.session_state["editing_student_id"]
-                st.rerun()
 
-def admin_classes_page():
-    st.header("Classes — Add / Delete")
-    with st.form("add_class_form", clear_on_submit=True):
-        class_type = st.selectbox("Class Type", ["Bharatanatyam","Modern","Singing"])
-        day = st.selectbox("Day of Week", ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"])
-        time_str = st.text_input("Time (e.g. 5:00 PM)")
-        instructor = st.text_input("Instructor")
-        notes = st.text_area("Notes")
-        add_class_submitted = st.form_submit_button("Add Class")
-    if add_class_submitted:
-        if not time_str.strip():
-            st.error("Enter class time")
-        else:
-            execute_sql("INSERT INTO classes (class_type, day_of_week, time, instructor, notes) VALUES (?,?,?,?,?)",
-                        (class_type, day, time_str.strip(), instructor.strip() or None, notes.strip() or None))
-            st.success("Class added")
-            st.rerun()
+# ─────────────────────────────────────────
+# PAGE: CLASSES
+# ─────────────────────────────────────────
+def classes_page():
+    require_admin()
+    st.header("🎓 Classes")
 
-    st.markdown("---")
-    classes = fetchall_dict("SELECT * FROM classes ORDER BY id DESC")
+    with st.expander("➕ Add Class"):
+        c1, c2 = st.columns(2)
+        name       = c1.text_input("Class Name",  key="new_c_name")
+        instructor = c2.text_input("Instructor",  key="new_c_inst")
+        day        = c1.selectbox("Day", DAYS,    key="new_c_day")
+        time_val   = c2.text_input("Time (e.g. 5:00 PM)", key="new_c_time")
+
+        if st.button("➕ Add Class", type="primary"):
+            if not name.strip():
+                st.warning("Class name is required.")
+            else:
+                ok = db_run(
+                    "INSERT INTO classes(name,day,time,instructor) VALUES(?,?,?,?)",
+                    (name.strip(), day, time_val, instructor),
+                )
+                if ok:
+                    st.success(f"✅ Class '{name}' added.")
+                    st.rerun()
+
+    classes = db_all("SELECT * FROM classes ORDER BY day, time")
     if not classes:
         st.info("No classes yet.")
-    else:
-        df = pd.DataFrame(classes)
-        df['label'] = df.apply(lambda r: f"{r.get('class_type','')} - {r.get('day_of_week','')} {r.get('time','')}".strip(), axis=1)
-        st.dataframe(df[['id','label','instructor','notes']])
-        for c in classes:
-            c1, c2 = st.columns([6,1])
-            c1.write(f"**{c['class_type']}** — {c['day_of_week']} {c['time']} (ID:{c['id']}) — Instructor: {c.get('instructor') or '-'}")
-            if c2.button("Delete", key=f"delclass_{c['id']}"):
-                execute_sql("UPDATE students SET class_id=NULL WHERE class_id=?", (c['id'],))
-                execute_sql("DELETE FROM classes WHERE id=?", (c['id'],))
-                st.success("Class deleted (students unassigned)")
-                st.rerun()
-def admin_attendance_page():
-    st.header("Attendance (Enhanced)")
-
-    # Fetch classes
-    classes = fetchall_dict("SELECT id, class_type, day_of_week, time FROM classes ORDER BY id")
-    if not classes:
-        st.info("No classes available. Add classes first.")
         return
 
-    class_options = {c['id']: f"{c['class_type']} - {c['day_of_week']} {c['time']}" for c in classes}
-    class_id_list = list(class_options.keys())
-    class_labels_list = list(class_options.values())
+    for cls in classes:
+        with st.expander(f"{cls['name']}  •  {cls['day']}  {cls['time']}  •  {cls['instructor']}"):
+            c1, c2 = st.columns(2)
+            new_name = c1.text_input("Name",       cls["name"],       key=f"cn{cls['id']}")
+            new_inst = c2.text_input("Instructor",  cls["instructor"], key=f"ci{cls['id']}")
+            new_day  = c1.selectbox("Day", DAYS, index=DAYS.index(cls["day"]) if cls["day"] in DAYS else 0, key=f"cd{cls['id']}")
+            new_time = c2.text_input("Time",       cls["time"],       key=f"ct{cls['id']}")
+
+            b1, b2 = st.columns(2)
+            if b1.button("💾 Update", key=f"cu{cls['id']}"):
+                db_run(
+                    "UPDATE classes SET name=?,day=?,time=?,instructor=? WHERE id=?",
+                    (new_name, new_day, new_time, new_inst, cls["id"]),
+                )
+                st.success("Updated ✅")
+                st.rerun()
+            if b2.button("🗑️ Delete", key=f"cdel{cls['id']}"):
+                db_run("DELETE FROM classes WHERE id=?", (cls["id"],))
+                st.warning(f"Class '{cls['name']}' deleted.")
+                st.rerun()
+
+
+# ─────────────────────────────────────────
+# PAGE: ATTENDANCE
+# ─────────────────────────────────────────
+def attendance_page():
+    st.header("📋 Attendance")
+    today = date.today().isoformat()
+
+    # Admins can pick any date; parents see today only
+    if st.session_state.user["role"] == "admin":
+        chosen_date = st.date_input("Date", value=date.today()).isoformat()
+    else:
+        chosen_date = today
+        st.info(f"Showing attendance for today: {today}")
+
+    # Filter by class
+    classes = db_all("SELECT * FROM classes ORDER BY name")
+    class_options = {"All Classes": None, **{c["name"]: c["id"] for c in classes}}
+    filter_cls = st.selectbox("Filter by Class", list(class_options))
+    selected_class_id = class_options[filter_cls]
 
     # Fetch students
-    students = fetchall_dict("""
-        SELECT s.id, s.name, s.class_id, c.class_type, c.day_of_week, c.time
-        FROM students s LEFT JOIN classes c ON s.class_id=c.id
-        ORDER BY s.name
-    """)
+    if selected_class_id:
+        students = db_all("SELECT * FROM students WHERE class_id=? ORDER BY name", (selected_class_id,))
+    else:
+        students = db_all("SELECT * FROM students WHERE class_id IS NOT NULL ORDER BY name")
+
     if not students:
-        st.info("No students found. Add students first.")
+        st.info("No students found for the selected filter.")
         return
 
-    # Default class
-    chosen_default_label = st.selectbox("Default Class (for quick set)", class_labels_list, index=0)
-    chosen_default_id = [cid for cid, lbl in class_options.items() if lbl == chosen_default_label][0]
-
-    st.markdown("### Mark attendance for each student")
-
-    with st.form("attendance_bulk_form"):
-        status_map = {}
-        class_map = {}
-
-        for s in students:
-            cols = st.columns([3, 3, 4])
-            cols[0].write(s['name'])
-
-            # Attendance radio
-            status = cols[1].radio(
-                "Status",
-                ["Present", "Absent"],
-                key=f"att_status_{s['id']}",
-                horizontal=True
-            )
-            status_map[s['id']] = status
-
-            # Class dropdown
-            default_for_student = s.get('class_id') or chosen_default_id
-            try:
-                default_index = class_id_list.index(default_for_student)
-            except ValueError:
-                default_index = 0
-            selected_label = cols[2].selectbox(
-                "Class (day/time)",
-                class_labels_list,
-                index=default_index,
-                key=f"att_class_{s['id']}"
-            )
-            class_map[s['id']] = selected_label
-
-        attendance_submitted = st.form_submit_button("Save All Attendance")
-
-    if attendance_submitted:
-        today = date.today().isoformat()
-        saved = 0
-        for s in students:
-            status = status_map[s['id']]
-            selected_label = class_map[s['id']]
-            sel_ids = [cid for cid, lbl in class_options.items() if lbl == selected_label]
-            sel_cid = sel_ids[0] if sel_ids else chosen_default_id
-            upsert_attendance(sel_cid, s['id'], today, status)
-            saved += 1
-        st.success(f"Saved attendance for {saved} students")
-        st.rerun()
+    # Load existing attendance for chosen date
+    existing = {
+        r["student_id"]: r["status"]
+        for r in db_all("SELECT student_id, status FROM attendance WHERE date=?", (chosen_date,))
+    }
 
     st.markdown("---")
-    st.subheader("Attendance Records (latest first)")
-    records = fetchall_dict("""
-        SELECT a.id, s.name as student_name, c.class_type, c.day_of_week, c.time, a.date, a.status
-        FROM attendance a
-        JOIN students s ON a.student_id = s.id
-        JOIN classes c ON a.class_id = c.id
-        ORDER BY a.date DESC, a.id DESC
-    """)
-    if records:
-        df = pd.DataFrame(records)
-        st.dataframe(df)
-    else:
-        st.info("No attendance records yet.")
+    header = st.columns([4, 3, 2])
+    header[0].markdown("**Student**")
+    header[1].markdown("**Status**")
+    header[2].markdown("**Action**")
 
-def admin_fees_page():
-    st.header("Fees — Record & View")
-    students = fetchall_dict("SELECT id, name FROM students ORDER BY name")
-    if not students:
-        st.info("Add students first.")
-        return
-    student_map = { f"{s['name']} (ID:{s['id']})": s['id'] for s in students }
-
-    with st.form("fee_form", clear_on_submit=True):
-        sel = st.selectbox("Select Student", list(student_map.keys()))
-        sid = student_map[sel]
-        month = st.selectbox("Month", ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"])
-        amount = st.number_input("Amount", min_value=0.0, format="%.2f")
-        status = st.selectbox("Status", ["due","paid","partial"])
-        fee_submitted = st.form_submit_button("Record Fee")
-    if fee_submitted:
-        execute_sql("INSERT INTO fees (student_id, amount, month, status, paid_date) VALUES (?,?,?,?,?)",
-                    (sid, float(amount), month, status, date.today().isoformat()))
-        st.success("Fee recorded")
-        st.rerun()
-
-    st.markdown("---")
-    st.subheader("Fee Records")
-    fees = fetchall_dict("""SELECT f.id, s.name as student_name, f.month, f.amount, f.status, f.paid_date
-                            FROM fees f JOIN students s ON f.student_id = s.id
-                            ORDER BY f.id DESC""")
-    if fees:
-        st.dataframe(pd.DataFrame(fees))
-    else:
-        st.info("No fee records yet.")
-
-def admin_users_page():
-    st.header("Users — Create Parent Account (link to student)")
-    students = fetchall_dict("SELECT id, name FROM students ORDER BY name")
-    student_map = {"Not linked": None}
     for s in students:
-        student_map[f"{s['name']} (ID:{s['id']})"] = s['id']
+        c1, c2, c3 = st.columns([4, 3, 2])
+        c1.write(s["name"])
+        current = existing.get(s["id"], "Present")
+        status = c2.radio(
+            "Status", ["Present", "Absent"],
+            index=0 if current == "Present" else 1,
+            horizontal=True,
+            key=f"att_{s['id']}_{chosen_date}",
+            label_visibility="collapsed",
+        )
+        if c3.button("Save", key=f"asave_{s['id']}_{chosen_date}"):
+            # UPSERT – handles duplicate gracefully
+            db_run(
+                """INSERT INTO attendance(student_id, class_id, date, status) VALUES(?,?,?,?)
+                   ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status""",
+                (s["id"], s.get("class_id"), chosen_date, status),
+            )
+            st.success(f"Saved {s['name']}: {status}")
 
-    with st.form("create_parent_form", clear_on_submit=True):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        student_label = st.selectbox("Link to Student", list(student_map.keys()))
-        student_id = student_map[student_label]
-        parent_submitted = st.form_submit_button("Create Parent Account")
-    if parent_submitted:
-        if not username or not password:
-            st.error("Provide username & password")
-        else:
-            ok, msg = create_parent_user(username, password, student_id)
-            if ok:
-                st.success("Parent account created")
-            else:
-                st.error(msg)
+    # Bulk save all
+    if st.button("💾 Save All", type="primary"):
+        for s in students:
+            widget_key = f"att_{s['id']}_{chosen_date}"
+            status = st.session_state.get(widget_key, "Present")
+            db_run(
+                """INSERT INTO attendance(student_id, class_id, date, status) VALUES(?,?,?,?)
+                   ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status""",
+                (s["id"], s.get("class_id"), chosen_date, status),
+            )
+        st.success("✅ All attendance saved.")
 
-# -------------------------
-# Parent pages
-# -------------------------
-def parent_dashboard(user):
-    st.header("Parent Dashboard")
-    sid = user.get("student_id")
-    if not sid:
-        st.info("Your account is not linked to a student. Contact admin.")
+
+# ─────────────────────────────────────────
+# PAGE: FEES
+# ─────────────────────────────────────────
+def fees_page():
+    st.header("💰 Fees")
+
+    # Parents see only their linked student
+    user = st.session_state.user
+    if user["role"] == "parent" and user.get("student_id"):
+        students = db_all("SELECT * FROM students WHERE id=?", (user["student_id"],))
+    else:
+        students = db_all("SELECT * FROM students ORDER BY name")
+
+    if not students:
+        st.info("No students found.")
         return
-    s = fetchone_dict("SELECT s.*, c.class_type, c.day_of_week, c.time FROM students s LEFT JOIN classes c ON s.class_id=c.id WHERE s.id=?", (sid,))
-    if not s:
-        st.error("Linked student not found.")
-        return
 
-    st.subheader(f"Student: {s['name']}")
-    st.write(f"Age: {s.get('age') or '-'} | Parent: {s.get('guardian_name') or '-'} | Contact: {s.get('contact') or '-'}")
-    st.write(f"Class: { (s.get('class_type') or '') + ' ' + (s.get('day_of_week') or '') + ' ' + (s.get('time') or '') }")
+    smap = {s["name"]: s["id"] for s in students}
 
-    st.markdown("---")
-    st.subheader("Attendance")
-    rows = fetchall_dict("SELECT date, status FROM attendance WHERE student_id=? ORDER BY date DESC", (sid,))
+    if user["role"] == "admin":
+        with st.expander("➕ Record Fee Payment"):
+            c1, c2, c3, c4 = st.columns(4)
+            selected_student = c1.selectbox("Student", list(smap))
+            month  = c2.selectbox("Month", MONTHS)
+            amount = c3.number_input("Amount (₹)", min_value=0.0, step=100.0)
+            status = c4.selectbox("Status", ["due", "paid"])
+
+            if st.button("💾 Save Fee", type="primary"):
+                ok = db_run(
+                    """INSERT INTO fees(student_id, month, amount, status) VALUES(?,?,?,?)
+                       ON CONFLICT(student_id, month) DO UPDATE SET amount=excluded.amount, status=excluded.status""",
+                    (smap[selected_student], month, amount, status),
+                )
+                if ok:
+                    st.success("Fee record saved ✅")
+                    st.rerun()
+
+    # ── Summary table ──────────────────────────────────────────────
+    student_ids = list(smap.values())
+    placeholders = ",".join("?" * len(student_ids))
+    rows = db_all(
+        f"""SELECT f.id, s.name AS Student, f.month AS Month,
+                   f.amount AS Amount, f.status AS Status
+            FROM fees f JOIN students s ON f.student_id=s.id
+            WHERE f.student_id IN ({placeholders})
+            ORDER BY s.name, f.month""",
+        tuple(student_ids),
+    )
+
     if rows:
         df = pd.DataFrame(rows)
-        df['present'] = df['status'].apply(lambda x: 1 if x=="Present" else 0)
-        st.dataframe(df)
-        fig = px.bar(df, x='date', y='present', labels={'present':'Present(1)/Absent(0)'}, title="Attendance")
-        st.plotly_chart(fig)
-        st.write(f"Recorded days: {len(df)} — Present%: {df['present'].mean()*100:.1f}%")
+        # Color-code status
+        def highlight_status(val):
+            return "background-color: #d4edda" if val == "paid" else "background-color: #f8d7da"
+
+        st.dataframe(
+            df.drop(columns=["id"]).style.applymap(highlight_status, subset=["Status"]),
+            use_container_width=True,
+        )
+
+        # Quick stats
+        total_due  = sum(r["Amount"] for r in rows if r["Status"] == "due")
+        total_paid = sum(r["Amount"] for r in rows if r["Status"] == "paid")
+        m1, m2 = st.columns(2)
+        m1.metric("Total Paid ✅", f"₹{total_paid:,.0f}")
+        m2.metric("Total Due ⚠️",  f"₹{total_due:,.0f}")
     else:
-        st.info("No attendance records yet.")
+        st.info("No fee records found.")
+
+
+# ─────────────────────────────────────────
+# PAGE: USERS  (admin only)
+# ─────────────────────────────────────────
+def users_page():
+    require_admin()
+    st.header("👤 Users")
+
+    students = db_all("SELECT id, name FROM students ORDER BY name")
+    smap = {"— None —": None, **{s["name"]: s["id"] for s in students}}
+
+    with st.expander("➕ Create User"):
+        c1, c2 = st.columns(2)
+        username = c1.text_input("Username")
+        password = c2.text_input("Password", type="password")
+        role     = c1.selectbox("Role", ["parent", "admin"])
+        linked   = c2.selectbox("Link to Student", list(smap))
+
+        if st.button("➕ Create User", type="primary"):
+            if not username.strip() or not password:
+                st.warning("Username and password are required.")
+            elif db_one("SELECT 1 FROM users WHERE username=?", (username,)):
+                st.error("Username already exists.")
+            else:
+                ok = db_run(
+                    "INSERT INTO users(username, password_hash, role, student_id) VALUES(?,?,?,?)",
+                    (username.strip(), hash_pw(password), role, smap[linked]),
+                )
+                if ok:
+                    st.success(f"User '{username}' created ✅")
+                    st.rerun()
 
     st.markdown("---")
-    st.subheader("Fees")
-    fees = fetchall_dict("SELECT month, amount, status, paid_date FROM fees WHERE student_id=? ORDER BY id DESC", (sid,))
-    if fees:
-        st.dataframe(pd.DataFrame(fees))
-    else:
-        st.info("No fee records yet.")
+    users = db_all("SELECT id, username, role, student_id FROM users ORDER BY role, username")
+    if users:
+        st.dataframe(pd.DataFrame(users), use_container_width=True)
 
-# -------------------------
-# Main app
-# -------------------------
-def main():
-    st.set_page_config(page_title="Natyashree School of Dance", layout="wide")
-    
-    st.title("💃Natyashree School of Dance💃")
-   
+    # Change password
+    with st.expander("🔑 Change Password"):
+        unames = [u["username"] for u in users]
+        target = st.selectbox("User", unames, key="cpw_user")
+        new_pw = st.text_input("New Password", type="password", key="cpw_pw")
+        if st.button("Update Password"):
+            if not new_pw:
+                st.warning("Password cannot be empty.")
+            else:
+                db_run("UPDATE users SET password_hash=? WHERE username=?", (hash_pw(new_pw), target))
+                st.success("Password updated ✅")
 
-    # initialize DB (reset optional)
-    init_db(reset=RESET_ON_START)
 
-    # ensure session_state key exists
-    if "user" not in st.session_state:
-        st.session_state["user"] = None
-
-    # login
-    if st.session_state["user"] is None:
-        st.sidebar.header("Login")
-        uname = st.sidebar.text_input("Username")
-        pwd = st.sidebar.text_input("Password", type="password")
-        if st.sidebar.button("Login"):
-            user = authenticate(uname, pwd)
+# ─────────────────────────────────────────
+# LOGIN PAGE
+# ─────────────────────────────────────────
+def login_page():
+    st.markdown("## 🔐 Login")
+    col, _ = st.columns([1, 2])
+    with col:
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.button("Login", type="primary", use_container_width=True):
+            user = authenticate(username, password)
             if user:
-                st.session_state["user"] = user
+                st.session_state.user = user
+                st.session_state.page = "Students" if user["role"] == "admin" else "Attendance"
                 st.rerun()
             else:
-                st.sidebar.error("Invalid credentials")
-        st.sidebar.markdown("---")
-        #st.sidebar.info("Default admin: username=`admin` password=`admin123` (use --reset to recreate DB if needed)")
+                st.error("Invalid username or password.")
+
+
+# ─────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────
+def main():
+    init_db()
+
+    # Session defaults
+    st.session_state.setdefault("user", None)
+    st.session_state.setdefault("page", "Students")
+
+    st.title("💃 Natyashree School of Dance")
+
+    if not st.session_state.user:
+        login_page()
         return
 
-    # logged in
-    user = st.session_state["user"]
-    st.sidebar.success(f"Logged in as: {user['username']} ({user['role']})")
-    if st.sidebar.button("Logout"):
-        st.session_state["user"] = None
+    top_menu(st.session_state.user["role"])
+
+    page = st.session_state.page
+    if page == "Students":   students_page()
+    elif page == "Classes":  classes_page()
+    elif page == "Attendance": attendance_page()
+    elif page == "Fees":     fees_page()
+    elif page == "Users":    users_page()
+    elif page == "Logout":
+        st.session_state.user = None
+        st.session_state.page = "Students"
         st.rerun()
 
-    # admin reset DB button (destructive)
-    if user.get("role") == "admin":
-        if st.sidebar.button("Reset DB (wipe ALL data)"):
-            init_db(reset=True)
-            st.sidebar.success("DB reset. Please login again.")
-            st.session_state["user"] = None
-            st.rerun()
-
-    # routing
-    if user.get("role") == "admin":
-        page = st.sidebar.selectbox("Admin Menu", ["Students","Classes","Attendance","Fees","Users"])
-        if page == "Students":
-            admin_students_page()
-        elif page == "Classes":
-            admin_classes_page()
-        elif page == "Attendance":
-            admin_attendance_page()
-        elif page == "Fees":
-            admin_fees_page()
-        elif page == "Users":
-            admin_users_page()
-    elif user.get("role") == "parent":
-        parent_dashboard(user)
-    else:
-        st.error("Unknown role")
-      
 
 if __name__ == "__main__":
     main()
