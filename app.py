@@ -21,6 +21,18 @@ MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
 ADMIN_PAGES  = ["Students", "Classes", "Attendance", "Fees", "Users", "Logout"]
 PARENT_PAGES = ["Attendance", "Fees", "Logout"]
 
+#----------------Hide streamlit buttons 
+
+hide_streamlit_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            header {visibility: hidden;}
+            footer {visibility: hidden;}
+            .stAppDeployButton {display: none;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────
 # THEME  — soft sage + ivory + terracotta
