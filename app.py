@@ -1067,7 +1067,7 @@ def fees_page():
                 return "background-color:#edf4ef;color:#3d5c47;font-weight:500"
             return "background-color:#fdf0ed;color:#c0614a;font-weight:500"
         st.dataframe(
-            df.drop(columns=["id"]).style.applymap(color_status, subset=["Status"]),
+            df.drop(columns=["id"]).style.map(color_status, subset=["Status"]),
             use_container_width=True,
         )
         total_paid = sum(r["Amount"] for r in rows if r["Status"] == "paid")
