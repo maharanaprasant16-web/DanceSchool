@@ -23,7 +23,7 @@ ADMIN_PAGES  = ["🔔 Notices", "👩‍🎓 Students", "🎓 Classes", "📋 At
 PARENT_PAGES = ["🔔 Notices", "📋 Attendance", "💰 Fees", "🚪 Logout"]
 
 PAGE_KEY_MAP = {
-    "🔔 Notices":    "Notices",
+    "🔔 Notices":    "Notice",
     "👩‍🎓 Students":  "Students",
     "🎓 Classes":    "Classes",
     "📋 Attendance": "Attendance",
